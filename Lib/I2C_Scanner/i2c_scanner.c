@@ -9,6 +9,7 @@ static const I2C_DeviceInfo_t known_devices[] = {
     {0x38, "AHT20", "温湿度计"},
     {0x3C, "SSD1306/SSD1315", "OLED 128x64"},
     {0x40, "INA226", "电流传感器"},
+    {0x68, "MPU6050", "惯性测量单元"},
     {0x76, "BMP280", "气压计"}
 };
 static const uint16_t known_count = sizeof(known_devices) / sizeof(known_devices[0]);
