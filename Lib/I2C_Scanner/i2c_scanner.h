@@ -18,8 +18,8 @@ typedef struct
     uint8_t count; // 检测到的设备数量
 } I2C_ScanResult_t;
 
-#define I2C_SCANN_TRIALS 2 // 扫描尝试次数
-#define I2C_SCANN_TIMEOUT 30 // 扫描超时时间(ms)
+#define I2C_SCANN_TRIALS 1 // 扫描尝试次数
+#define I2C_SCANN_TIMEOUT 10 // 扫描超时时间(ms)
 // #define I2C_SCANN_DELAY 1 // 扫描间隔时间(ms), 注释以取消延时
 
 // 这几坨纯阻塞操作↓

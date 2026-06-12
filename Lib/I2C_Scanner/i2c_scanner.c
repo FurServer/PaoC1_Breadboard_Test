@@ -49,8 +49,16 @@ void I2C_Scan_Device(I2C_HandleTypeDef* hi2c, I2C_ScanResult_t* result)
 
 void I2C_Scan_Print_UART(I2C_ScanResult_t* result, UART_HandleTypeDef* huart, uint32_t timeout)
 {
-    uint8_t buffer[64];
+    uint8_t buffer[256];
     uint8_t len;
+
+    // 如果未扫描到设备
+    if (result->count == 0)
+    {
+        len = sprintf((char*)buffer, "\033[91mNo I2C device.\033[0m\r\n");
+        HAL_UART_Transmit(huart, buffer, len, timeout);
+        return;
+    }
 
     len = sprintf((char*)buffer, "\033[42mFound %d I2C device(s):\033[0m\r\n", result->count);
     HAL_UART_Transmit(huart, buffer, len, timeout);
