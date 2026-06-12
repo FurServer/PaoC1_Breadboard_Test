@@ -1,5 +1,5 @@
 .idea/
 build/
 doc/
-Core/Inc/Backup
-Core/Src/Backup
+Core/Inc/Backup/
+Core/Src/Backup/
