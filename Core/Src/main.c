@@ -160,13 +160,13 @@ int main(void)
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
     // 应用初始化
-    // HAL_TIM_Base_Start_IT(&htim2);
+    HAL_TIM_Base_Start_IT(&htim2);
     // HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
 
     // UART接收中断
-    // HAL_UART_Receive_IT(&huart1, (uint8_t*)&recv_buf, 1);
-    // // Shell
-    // userShellInit();
+    HAL_UART_Receive_IT(&huart1, (uint8_t*)&recv_buf, 1);
+    // Shell
+    userShellInit();
     // u8g2
     u8g2Init(&u8g2);
 
