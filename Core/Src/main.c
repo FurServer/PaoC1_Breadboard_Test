@@ -30,7 +30,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "printf.h"
-
+#include "driver_mpu6050_basic.h"
+#include <math.h>
 
 /* USER CODE END Includes */
 
@@ -90,6 +91,16 @@ volatile uint32_t adc_dma_buffer;
 int8_t recv_buf = 0;
 
 u8g2_t u8g2;
+
+/* MPU6050 全局数据: 3欧拉角 + 3轴加速度 + 3轴陀螺仪 (供用户绘制屏幕) */
+static float g_pitch = 0.0f;
+static float g_roll = 0.0f;
+static float g_yaw = 0.0f;
+static float g_acc[3] = {0}; /* X Y Z 加速度 (g) */
+static float g_dps[3] = {0}; /* X Y Z 角速度 (dps) */
+static float g_gyro_bias[3] = {0};
+static uint8_t g_calibrated = 0;
+static uint32_t g_last_tick = 0;
 
 // 定时器中断
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
@@ -170,12 +181,132 @@ int main(void)
     // u8g2
     u8g2Init(&u8g2);
 
-    u8g2_FirstPage(&u8g2);
-    do
+    // MPU6050 Basic 初始化 (只读加速度计+陀螺仪原始值)
+    mpu6050_basic_init(MPU6050_ADDRESS_AD0_LOW);
+
+    /* ================================================================
+     * 陀螺仪零偏校准 (修剪均值法)
+     *
+     * 策略:
+     *   1. 预热延迟, 让传感器稳定
+     *   2. 丢弃前 DISCARD 个不稳定样本
+     *   3. 采集 TOTAL 个有效样本
+     *   4. 对每轴排序后, 修剪两端各 TRIM_PCT% 极值
+     *   5. 对中间样本求均值 → 直接作为偏置
+     *
+     *   注意: 校准阶段不做死区归零! 修剪均值已是可靠统计结果,
+     *   死区应在主循环中作用于偏置修正后的角速度。
+     * ================================================================ */
     {
-        draw_u8g2_example(&u8g2);
+        #define CALIB_TOTAL_SAMPLES   300   /* 总采样数                            */
+        #define CALIB_DISCARD         20    /* 丢弃前 N 个不稳定样本               */
+        #define CALIB_TRIM_PCT        15    /* 修剪百分比 (去掉两端的极端值)       */
+        #define CALIB_DELAY_MS        5     /* 采样间隔 ms                        */
+        #define CALIB_WARMUP_MS       300   /* 预热等待 ms                        */
+
+        float g[3], dps[3];
+        int i, j;
+        float samples_x[CALIB_TOTAL_SAMPLES];
+        float samples_y[CALIB_TOTAL_SAMPLES];
+        float samples_z[CALIB_TOTAL_SAMPLES];
+        float min_x, max_x, min_y, max_y, min_z, max_z;
+
+        printf("[MPU6050] 传感器预热 %d ms ...\n", CALIB_WARMUP_MS);
+        HAL_Delay(CALIB_WARMUP_MS);
+
+        /* 丢弃前 CALIB_DISCARD 个样本 (传感器上电后需要稳定) */
+        printf("[MPU6050] 丢弃前 %d 个不稳定样本...\n", CALIB_DISCARD);
+        for (i = 0; i < CALIB_DISCARD; i++)
+        {
+            mpu6050_basic_read(g, dps);
+            HAL_Delay(CALIB_DELAY_MS);
+        }
+
+        /* 采集有效样本 */
+        printf("[MPU6050] 采集 %d 个样本...\n", CALIB_TOTAL_SAMPLES);
+        for (i = 0; i < CALIB_TOTAL_SAMPLES; i++)
+        {
+            mpu6050_basic_read(g, dps);
+            samples_x[i] = dps[0];
+            samples_y[i] = dps[1];
+            samples_z[i] = dps[2];
+            HAL_Delay(CALIB_DELAY_MS);
+        }
+
+        /* 辅助: 冒泡排序 (样本量小, 无需 qsort) */
+        #define SORT_BUBBLE(arr, n)                                \
+            do {                                                   \
+                for (i = 0; i < (n) - 1; i++)                      \
+                {                                                  \
+                    for (j = i + 1; j < (n); j++)                  \
+                    {                                              \
+                        if ((arr)[i] > (arr)[j])                   \
+                        {                                          \
+                            float _t = (arr)[i];                   \
+                            (arr)[i] = (arr)[j];                   \
+                            (arr)[j] = _t;                         \
+                        }                                          \
+                    }                                              \
+                }                                                  \
+            } while(0)
+
+        SORT_BUBBLE(samples_x, CALIB_TOTAL_SAMPLES);
+        SORT_BUBBLE(samples_y, CALIB_TOTAL_SAMPLES);
+        SORT_BUBBLE(samples_z, CALIB_TOTAL_SAMPLES);
+
+        /* 统计: 记录排序后的 min / max */
+        int trim_n = CALIB_TOTAL_SAMPLES * CALIB_TRIM_PCT / 100;  /* 每端修剪数 */
+        int use_start = trim_n;
+        int use_end   = CALIB_TOTAL_SAMPLES - trim_n;
+        int use_count = use_end - use_start;
+
+        min_x = samples_x[0];
+        max_x = samples_x[CALIB_TOTAL_SAMPLES - 1];
+        min_y = samples_y[0];
+        max_y = samples_y[CALIB_TOTAL_SAMPLES - 1];
+        min_z = samples_z[0];
+        max_z = samples_z[CALIB_TOTAL_SAMPLES - 1];
+
+        /* 修剪均值 */
+        g_gyro_bias[0] = 0.0f;
+        g_gyro_bias[1] = 0.0f;
+        g_gyro_bias[2] = 0.0f;
+        for (i = use_start; i < use_end; i++)
+        {
+            g_gyro_bias[0] += samples_x[i];
+            g_gyro_bias[1] += samples_y[i];
+            g_gyro_bias[2] += samples_z[i];
+        }
+        g_gyro_bias[0] /= (float)use_count;
+        g_gyro_bias[1] /= (float)use_count;
+        g_gyro_bias[2] /= (float)use_count;
+
+        /* 注意: 校准阶段不做死区归零!
+         * 修剪均值已经剔除了离群噪声, 保留的偏置值是统计上有效的测量结果。
+         * 死区应在主循环中作用于"偏置修正后的角速度", 而非偏置本身,
+         * 否则会导致真实偏置被错误归零, 引起 Yaw 持续漂移。
+         */
+
+        /* 输出校准结果 */
+        printf("[MPU6050] 零偏校准完成 (修剪 %d%% 极值, 有效样本 %d / %d)\n",
+               CALIB_TRIM_PCT, use_count, CALIB_TOTAL_SAMPLES);
+        printf("[MPU6050] Bias X: %+.3f dps  (min:%+.3f  max:%+.3f  range:%.3f)\n",
+               g_gyro_bias[0], min_x, max_x, max_x - min_x);
+        printf("[MPU6050] Bias Y: %+.3f dps  (min:%+.3f  max:%+.3f  range:%.3f)\n",
+               g_gyro_bias[1], min_y, max_y, max_y - min_y);
+        printf("[MPU6050] Bias Z: %+.3f dps  (min:%+.3f  max:%+.3f  range:%.3f)\n",
+               g_gyro_bias[2], min_z, max_z, max_z - min_z);
+
+        #undef CALIB_TOTAL_SAMPLES
+        #undef CALIB_DISCARD
+        #undef CALIB_TRIM_PCT
+        #undef CALIB_DELAY_MS
+        #undef CALIB_WARMUP_MS
+        #undef SORT_BUBBLE
     }
-    while (u8g2_NextPage(&u8g2));
+
+
+    g_last_tick = HAL_GetTick();
 
 
   /* USER CODE END 2 */
@@ -197,7 +328,113 @@ int main(void)
         //     trigger = 0;
         // }
 
+        /* MPU6050 数据采集 + 互补滤波, 结果存入全局变量 */
 
+        #define GYRO_RUNTIME_DEAD_ZONE  0.5f  /* 运行时死区 dps: 绝对值小于此阈值的角速度强制归零 */
+
+        float g[3] = {0};
+        float dps[3] = {0};
+
+        if (mpu6050_basic_read(g, dps) == 0)
+        {
+            float dt, alpha = 0.98f;
+            uint32_t now = HAL_GetTick();
+
+            dt = (float)(now - g_last_tick) / 1000.0f;
+            g_last_tick = now;
+            if (dt > 0.5f || dt <= 0.0f) dt = 0.01f;
+
+            float gyro_x = dps[0] - g_gyro_bias[0];
+            float gyro_y = dps[1] - g_gyro_bias[1];
+            float gyro_z = dps[2] - g_gyro_bias[2];
+            float accel_pitch = atan2f(g[1], sqrtf(g[0] * g[0] + g[2] * g[2])) * 57.29578f;
+            float accel_roll = atan2f(-g[0], g[2]) * 57.29578f;
+
+            /* 三轴统一运行时死区: 防止偏置修正后的残余微小角速度累积 */
+            if (gyro_x > -GYRO_RUNTIME_DEAD_ZONE && gyro_x < GYRO_RUNTIME_DEAD_ZONE) gyro_x = 0.0f;
+            if (gyro_y > -GYRO_RUNTIME_DEAD_ZONE && gyro_y < GYRO_RUNTIME_DEAD_ZONE) gyro_y = 0.0f;
+            if (gyro_z > -GYRO_RUNTIME_DEAD_ZONE && gyro_z < GYRO_RUNTIME_DEAD_ZONE) gyro_z = 0.0f;
+
+            if (!g_calibrated)
+            {
+                g_pitch = accel_pitch;
+                g_roll = accel_roll;
+                g_yaw = 0.0f;
+                g_calibrated = 1;
+            }
+            else
+            {
+                g_pitch = alpha * (g_pitch + gyro_x * dt) + (1.0f - alpha) * accel_pitch;
+                g_roll = alpha * (g_roll + gyro_y * dt) + (1.0f - alpha) * accel_roll;
+                g_yaw += gyro_z * dt;
+            }
+
+            #undef GYRO_RUNTIME_DEAD_ZONE
+
+            /* 存入原始数据全局变量 (供用户绘制屏幕) */
+            g_acc[0] = g[0];
+            g_acc[1] = g[1];
+            g_acc[2] = g[2];
+            g_dps[0] = dps[0];
+            g_dps[1] = dps[1];
+            g_dps[2] = dps[2];
+        }
+
+        /* ===== 用户自行绘制屏幕区域 ===== */
+        /* 可用全局变量: */
+        /*   欧拉角:  g_pitch, g_roll, g_yaw     (单位: 度) */
+        /*   加速度:  g_acc[0] g_acc[1] g_acc[2] (单位: g, X Y Z) */
+        /*   角速度:  g_dps[0] g_dps[1] g_dps[2] (单位: dps, X Y Z) */
+        /* =============================== */
+
+        /* 显示到 OLED (9 个数据, 5 行紧凑布局) */
+        char buf[32];
+
+        /* 整数拆分 (避免 %f 需要 _printf_float) */
+        // @formatter:off
+        // int pi, pf, ri, rf, yi, yf;
+        // int axi, axf, ayi, ayf, azi, azf;
+        // int gxi, gxf, gyi, gyf, gzi, gzf;
+        // pi = (int)g_pitch;  pf = (int)((g_pitch - pi) * 100.0f); if (pf < 0) pf = -pf;
+        // ri = (int)g_roll;   rf = (int)((g_roll  - ri) * 100.0f); if (rf < 0) rf = -rf;
+        // yi = (int)g_yaw;    yf = (int)((g_yaw   - yi) * 100.0f); if (yf < 0) yf = -yf;
+        // axi = (int)g_acc[0]; axf = (int)((g_acc[0] - axi) * 100.0f); if (axf < 0) axf = -axf;
+        // ayi = (int)g_acc[1]; ayf = (int)((g_acc[1] - ayi) * 100.0f); if (ayf < 0) ayf = -ayf;
+        // azi = (int)g_acc[2]; azf = (int)((g_acc[2] - azi) * 100.0f); if (azf < 0) azf = -azf;
+        // gxi = (int)g_dps[0]; gxf = (int)((g_dps[0] - gxi) * 100.0f); if (gxf < 0) gxf = -gxf;
+        // gyi = (int)g_dps[1]; gyf = (int)((g_dps[1] - gyi) * 100.0f); if (gyf < 0) gyf = -gyf;
+        // gzi = (int)g_dps[2]; gzf = (int)((g_dps[2] - gzi) * 100.0f); if (gzf < 0) gzf = -gzf;
+        // @formatter:on
+
+        u8g2_FirstPage(&u8g2);
+        do
+        {
+            u8g2_SetFontMode(&u8g2, 1);
+            u8g2_SetFontDirection(&u8g2, 0);
+            u8g2_SetFont(&u8g2, u8g2_font_t0_16_mr);
+
+
+            snprintf(buf, sizeof(buf), "P%7.02f", g_pitch);
+            u8g2_DrawStr(&u8g2, 0, 10, buf);
+            snprintf(buf, sizeof(buf), "R%7.02f", g_roll);
+            u8g2_DrawStr(&u8g2, 0, 23, buf);
+            snprintf(buf, sizeof(buf), "Y%7.02f", g_yaw);
+            u8g2_DrawStr(&u8g2, 0, 36, buf);
+            snprintf(buf, sizeof(buf), "Ax%6.02f", g_acc[0]);
+            u8g2_DrawStr(&u8g2, 0, 49, buf);
+            snprintf(buf, sizeof(buf), "Ay%6.02f", g_acc[1]);
+            u8g2_DrawStr(&u8g2, 0, 62, buf);
+            snprintf(buf, sizeof(buf), "Az%6.02f", g_acc[2]);
+            u8g2_DrawStr(&u8g2, 0, 75, buf);
+            snprintf(buf, sizeof(buf), "gx%6.02f", g_dps[0]);
+            u8g2_DrawStr(&u8g2, 0, 88, buf);
+            snprintf(buf, sizeof(buf), "gy%6.02f", g_dps[1]);
+            u8g2_DrawStr(&u8g2, 0, 101, buf);
+            snprintf(buf, sizeof(buf), "gz%6.02f", g_dps[2]);
+            u8g2_DrawStr(&u8g2, 0, 114, buf);
+            u8g2_DrawStr(&u8g2, 0, 127, " ");
+        }
+        while (u8g2_NextPage(&u8g2));
 
 
         // UART_GPIO_Indicator(&huart1, LED2_GPIO_Port, LED2_Pin, 0, 0);

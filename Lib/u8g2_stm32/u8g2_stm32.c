@@ -74,7 +74,7 @@ void u8g2Init(u8g2_t* u8g2)
     ********************************************/
     u8g2_Setup_ssd1315_i2c_128x64_noname_f(
         u8g2,
-        U8G2_R0,
+        U8G2_R1,
         u8x8_byte_stm32_hw_i2c,
         u8x8_stm32_gpio_and_delay
     );
