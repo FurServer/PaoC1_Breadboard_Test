@@ -283,52 +283,21 @@ int main(void)
                 mpu6050_read(&imu, g_acc, g_dps);
             }
         }
-
-        /* ===== 用户自行绘制屏幕区域 ===== */
-        /* 可用全局变量: */
-        /*   欧拉角:  g_pitch, g_roll, g_yaw     (单位: 度) */
-        /*   加速度:  g_acc[0] g_acc[1] g_acc[2] (单位: g, X Y Z) */
-        /*   角速度:  g_dps[0] g_dps[1] g_dps[2] (单位: dps, X Y Z) */
-        /* =============================== */
-
-        /* 显示到 OLED (9 个数据, 5 行紧凑布局) */
         char buf[32];
-
-        /* 整数拆分 (避免 %f 需要 _printf_float) */
-        // @formatter:off
-        // int pi, pf, ri, rf, yi, yf;
-        // int axi, axf, ayi, ayf, azi, azf;
-        // int gxi, gxf, gyi, gyf, gzi, gzf;
-        // pi = (int)g_pitch;  pf = (int)((g_pitch - pi) * 100.0f); if (pf < 0) pf = -pf;
-        // ri = (int)g_roll;   rf = (int)((g_roll  - ri) * 100.0f); if (rf < 0) rf = -rf;
-        // yi = (int)g_yaw;    yf = (int)((g_yaw   - yi) * 100.0f); if (yf < 0) yf = -yf;
-        // axi = (int)g_acc[0]; axf = (int)((g_acc[0] - axi) * 100.0f); if (axf < 0) axf = -axf;
-        // ayi = (int)g_acc[1]; ayf = (int)((g_acc[1] - ayi) * 100.0f); if (ayf < 0) ayf = -ayf;
-        // azi = (int)g_acc[2]; azf = (int)((g_acc[2] - azi) * 100.0f); if (azf < 0) azf = -azf;
-        // gxi = (int)g_dps[0]; gxf = (int)((g_dps[0] - gxi) * 100.0f); if (gxf < 0) gxf = -gxf;
-        // gyi = (int)g_dps[1]; gyf = (int)((g_dps[1] - gyi) * 100.0f); if (gyf < 0) gyf = -gyf;
-        // gzi = (int)g_dps[2]; gzf = (int)((g_dps[2] - gzi) * 100.0f); if (gzf < 0) gzf = -gzf;
-        // @formatter:on
-
         u8g2_FirstPage(&u8g2);
         do
         {
             u8g2_SetFontMode(&u8g2, 1);
             u8g2_SetFontDirection(&u8g2, 0);
             u8g2_SetFont(&u8g2, u8g2_font_t0_16_mr);
-
-
             snprintf(buf, sizeof(buf), "P%7.02f", g_pitch);
             u8g2_DrawStr(&u8g2, 0, 10, buf);
             snprintf(buf, sizeof(buf), "R%7.02f", g_roll);
             u8g2_DrawStr(&u8g2, 0, 23, buf);
             snprintf(buf, sizeof(buf), "Y%7.02f", g_yaw);
             u8g2_DrawStr(&u8g2, 0, 36, buf);
-
-            /* 第 4 行 (y=49): 四元数 w,x,y,z, 用小字体以容纳 4 个数值 */
             u8g2_SetFont(&u8g2, u8g2_font_5x7_mr);
-            snprintf(buf, sizeof(buf), "%+.2f%+.2f%+.2f%+.2f",
-                     g_quat[0], g_quat[1], g_quat[2], g_quat[3]);
+            snprintf(buf, sizeof(buf), "%+.2f%+.2f%+.2f%+.2f", g_quat[0], g_quat[1], g_quat[2], g_quat[3]);
             u8g2_DrawStr(&u8g2, 0, 49, buf);
         }
         while (u8g2_NextPage(&u8g2));
