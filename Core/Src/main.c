@@ -83,6 +83,21 @@ void SystemClock_Config(void);
 
 volatile uint32_t trigger = 0;
 
+/* ===== PB9 (TIM4_CH4) 正弦呼吸灯参数 ===== */
+/* TIM2 中断频率 = 72MHz / (71+1) / (799+1) = 1250 Hz (每 800us 中断一次)
+ * 采用半个正弦周期 (phase: 0 -> PI) 完成一次 "灭->亮->灭":
+ *   duty = sin(phase), phase=0 时灭, phase=PI/2 时最亮, phase=PI 时再次完全熄灭
+ * 一次呼吸所需中断次数 = BREATH_LED_STEPS, 熄灭后停顿中断次数 = BREATH_LED_PAUSE
+ */
+#define BREATH_LED_STEPS   6250U   /* 一次呼吸时长 = 6250/1250 = 5.0s */
+#define BREATH_LED_PAUSE   3000U   /* 熄灭后停顿  = 3000/1250 = 2.4s */
+#define BREATH_PI          3.14159265358979f
+
+static float    breath_phase = 0.0f;
+static const float breath_step = BREATH_PI / (float)BREATH_LED_STEPS;
+static uint8_t  breath_paused = 0;      /* 0=呼吸中, 1=熄灭停顿中 */
+static uint32_t breath_pause_cnt = 0;   /* 停顿计数器 */
+
 uint8_t tx_buffer[TX_BUFFER_SIZE];
 uint8_t rx_buffer[RX_BUFFER_SIZE];
 
@@ -108,6 +123,42 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
     if (htim->Instance == TIM2)
     {
         trigger++;
+
+        /* ===== PB9 正弦呼吸灯: 每次中断更新一次占空比 ===== */
+        float duty;
+
+        if (breath_paused)
+        {
+            /* 完全熄灭后的停顿阶段: 保持灭, 计满后开始下一轮呼吸 */
+            duty = 0.0f;
+            if (++breath_pause_cnt >= BREATH_LED_PAUSE)
+            {
+                breath_pause_cnt = 0;
+                breath_phase = 0.0f;
+                breath_paused = 0;
+            }
+        }
+        else
+        {
+            /* 呼吸阶段: phase 0 -> PI, duty = sin(phase) (灭 -> 亮 -> 灭) */
+            breath_phase += breath_step;
+            if (breath_phase >= BREATH_PI)
+            {
+                /* 到达终点, 完全熄灭并进入停顿 */
+                breath_phase = BREATH_PI;
+                duty = 0.0f;
+                breath_paused = 1;
+                breath_pause_cnt = 0;
+            }
+            else
+            {
+                duty = sinf(breath_phase);
+            }
+        }
+
+        /* 映射到 TIM4 的自动重装值 (Period = 65535) 并写入 CH4 比较寄存器 */
+        uint32_t ccr = (uint32_t)(duty * (float)__HAL_TIM_GET_AUTORELOAD(&htim4));
+        __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, ccr);
     }
 }
 
@@ -169,10 +220,12 @@ int main(void)
   MX_USART1_UART_Init();
   MX_TIM2_Init();
   MX_I2C1_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
     // 应用初始化
     HAL_TIM_Base_Start_IT(&htim2);
-    // HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
+    // PB9 呼吸灯: 启动 TIM4_CH4 PWM 输出, 占空比由 TIM2 中断中的正弦函数更新
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
 
     // UART接收中断
     HAL_UART_Receive_IT(&huart1, (uint8_t*)&recv_buf, 1);
