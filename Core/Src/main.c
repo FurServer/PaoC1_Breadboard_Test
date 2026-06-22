@@ -234,11 +234,11 @@ int main(void)
     // u8g2
     u8g2Init(&u8g2);
 
-    // ===== MPU6050: 初始化 + 陀螺仪零偏校准 =====
+    // MPU6050
     mpu6050_init(&imu, MPU6050_ACCEL_2G, MPU6050_GYRO_2000DPS);
-    printf("[MPU6050] 零偏校准中, 请保持静止...\n");
-    mpu6050_calibrate_gyro(&imu, 1000);
-    printf("[MPU6050] 校准完成. bias = %+.3f, %+.3f, %+.3f dps\n", imu.gyro_bias[0], imu.gyro_bias[1], imu.gyro_bias[2]);
+    // printf("[MPU6050] 校准零偏 保持静止\n");
+    // mpu6050_calibrate_gyro(&imu, 1000);
+    // printf("[MPU6050] 校准完成\nbias = %+.3f, %+.3f, %+.3f dps\n", imu.gyro_bias[0], imu.gyro_bias[1], imu.gyro_bias[2]);
 
 
     g_last_tick = HAL_GetTick();
