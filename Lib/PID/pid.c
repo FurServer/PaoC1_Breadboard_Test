@@ -226,10 +226,6 @@ float PID_ComputeDt(PID_t *pid, float target, float measure, float dt)
 {
     if (pid == 0) return 0.0f;
 
-    /* 用本次实测的真实时间间隔 (单位毫秒 ms)覆盖 dt (并防御非法值)。
-     * 内部 I 项 = Ki*e*dt、D 项 = Kd*de/dt 都直接用 pid->dt, 
-     * 直接把两次 HAL_GetTick() 之差(ms)传进来即可, 无需秒/毫秒换算；
-     * 即使每圈周期抖动, 传入真实 dt 也能得到一致的控制效果。 */
     if (dt > 0.0f)
         pid->dt = dt;
 

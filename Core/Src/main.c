@@ -30,7 +30,6 @@
 #include <stdio.h>
 #include <string.h>
 #include "printf.h"
-#include "mpu6050.h"                    // 精简可移植 MPU6050 库
 #include <math.h>
 
 /* USER CODE END Includes */
@@ -44,6 +43,27 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 // 宏常量
+
+/* ===== 平衡跷跷板 PID 控制参数 ===== */
+/* 通道A = TIM2_CH3 (使能使 Roll 减小), 通道B = TIM2_CH4 (使能使 Roll 增大)
+ * 目标: 维持 Roll = 0 (水平)
+ * 控制周期: TIM3 每 1ms 中断, 分频 5 次 => 每 5ms 计算一次 PID
+ * PWM: TIM2 ARR = 999, 占空比范围 0~999 (即 0~100%)
+ */
+#define BAL_TARGET_ROLL   0.0f      /* 目标 Roll (度) */
+#define BAL_PID_DT_MS     5.0f      /* PID 采样周期 (ms) */
+#define BAL_PID_TICK_DIV  5U        /* TIM3 1ms 中断分频, 5 次 = 5ms */
+#define BAL_PWM_PERIOD    999.0f    /* TIM2 自动重装值 (占空比满量程) */
+
+/* 风扇最小转速: 两个风扇均保持此基础占空比, 消除风扇启动死区,
+ * 使系统能够快速双向响应 (默认 20%). PID 在此基础上做差动调节. */
+#define BAL_FAN_MIN       5.0f     /* 最小转速 (%) */
+#define BAL_FAN_MAX       100.0f    /* 最大转速 (%) */
+
+/* 默认 PID 参数 (可通过 shell 的 kp/ki/kd 指令在线调整) */
+#define BAL_DEFAULT_KP    0.2f
+#define BAL_DEFAULT_KI    0.0002f
+#define BAL_DEFAULT_KD    300.0f
 
 /* USER CODE END PD */
 
@@ -77,26 +97,13 @@ void SystemClock_Config(void);
 #include "u8g2_stm32.h"
 #include "shell.h"
 #include "shell_port.h"
+#include "mpu6050.h"                    // 精简可移植 MPU6050 库
+#include "pid.h"                        // 通用 PID 控制器库
 
 #define TX_BUFFER_SIZE 32
 #define RX_BUFFER_SIZE 64
 
 volatile uint32_t trigger = 0;
-
-/* ===== PB9 (TIM4_CH4) 正弦呼吸灯参数 ===== */
-/* TIM2 中断频率 = 72MHz / (71+1) / (799+1) = 1250 Hz (每 800us 中断一次)
- * 采用半个正弦周期 (phase: 0 -> PI) 完成一次 "灭->亮->灭":
- *   duty = sin(phase), phase=0 时灭, phase=PI/2 时最亮, phase=PI 时再次完全熄灭
- * 一次呼吸所需中断次数 = BREATH_LED_STEPS, 熄灭后停顿中断次数 = BREATH_LED_PAUSE
- */
-#define BREATH_LED_STEPS   6250U   /* 一次呼吸时长 = 6250/1250 = 5.0s */
-#define BREATH_LED_PAUSE   3000U   /* 熄灭后停顿  = 3000/1250 = 2.4s */
-#define BREATH_PI          3.14159265358979f
-
-static float    breath_phase = 0.0f;
-static const float breath_step = BREATH_PI / (float)BREATH_LED_STEPS;
-static uint8_t  breath_paused = 0;      /* 0=呼吸中, 1=熄灭停顿中 */
-static uint32_t breath_pause_cnt = 0;   /* 停顿计数器 */
 
 uint8_t tx_buffer[TX_BUFFER_SIZE];
 uint8_t rx_buffer[RX_BUFFER_SIZE];
@@ -106,9 +113,10 @@ volatile uint32_t adc_dma_buffer;
 int8_t recv_buf = 0;
 
 u8g2_t u8g2;
+char oled[32];
 
-/* MPU6050 全局数据: 3欧拉角 + 3轴加速度 + 3轴陀螺仪 (供用户绘制屏幕) */
-static mpu6050_t imu;          /* 新库设备句柄 */
+// MPU6050全局数据
+static mpu6050_t imu;
 static float g_quat[4] = {1.0f, 0.0f, 0.0f, 0.0f}; /* 四元数 w,x,y,z */
 static float g_pitch = 0.0f;
 static float g_roll = 0.0f;
@@ -120,45 +128,10 @@ static uint32_t g_last_tick = 0;
 // 定时器中断
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
-    if (htim->Instance == TIM2)
+    if (htim->Instance == TIM3)
     {
         trigger++;
 
-        /* ===== PB9 正弦呼吸灯: 每次中断更新一次占空比 ===== */
-        float duty;
-
-        if (breath_paused)
-        {
-            /* 完全熄灭后的停顿阶段: 保持灭, 计满后开始下一轮呼吸 */
-            duty = 0.0f;
-            if (++breath_pause_cnt >= BREATH_LED_PAUSE)
-            {
-                breath_pause_cnt = 0;
-                breath_phase = 0.0f;
-                breath_paused = 0;
-            }
-        }
-        else
-        {
-            /* 呼吸阶段: phase 0 -> PI, duty = sin(phase) (灭 -> 亮 -> 灭) */
-            breath_phase += breath_step;
-            if (breath_phase >= BREATH_PI)
-            {
-                /* 到达终点, 完全熄灭并进入停顿 */
-                breath_phase = BREATH_PI;
-                duty = 0.0f;
-                breath_paused = 1;
-                breath_pause_cnt = 0;
-            }
-            else
-            {
-                duty = sinf(breath_phase);
-            }
-        }
-
-        /* 映射到 TIM4 的自动重装值 (Period = 65535) 并写入 CH4 比较寄存器 */
-        uint32_t ccr = (uint32_t)(duty * (float)__HAL_TIM_GET_AUTORELOAD(&htim4));
-        __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, ccr);
     }
 }
 
@@ -221,11 +194,9 @@ int main(void)
   MX_TIM2_Init();
   MX_I2C1_Init();
   MX_TIM4_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
     // 应用初始化
-    HAL_TIM_Base_Start_IT(&htim2);
-    // PB9 呼吸灯: 启动 TIM4_CH4 PWM 输出, 占空比由 TIM2 中断中的正弦函数更新
-    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
 
     // UART接收中断
     HAL_UART_Receive_IT(&huart1, (uint8_t*)&recv_buf, 1);
@@ -239,6 +210,8 @@ int main(void)
     // printf("[MPU6050] 校准零偏 保持静止\n");
     // mpu6050_calibrate_gyro(&imu, 1000);
     // printf("[MPU6050] 校准完成\nbias = %+.3f, %+.3f, %+.3f dps\n", imu.gyro_bias[0], imu.gyro_bias[1], imu.gyro_bias[2]);
+
+    HAL_TIM_Base_Start_IT(&htim3);
 
 
     g_last_tick = HAL_GetTick();
@@ -263,42 +236,40 @@ int main(void)
         //     trigger = 0;
         // }
 
-        /* MPU6050 数据采集 + Mahony 四元数解算, 结果存入全局变量 */
+
+        float dt;
+        uint32_t now = HAL_GetTick();
+
+        dt = (float)(now - g_last_tick) / 1000.0f;
+        g_last_tick = now;
+        if (dt > 0.5f || dt <= 0.0f) dt = 0.01f;
+
+        /* 新库内部完成: 读取传感器 -> 扣除零偏 -> Mahony 融合更新四元数 */
+        if (mpu6050_update(&imu, dt) == 0)
         {
-            float dt;
-            uint32_t now = HAL_GetTick();
-
-            dt = (float)(now - g_last_tick) / 1000.0f;
-            g_last_tick = now;
-            if (dt > 0.5f || dt <= 0.0f) dt = 0.01f;
-
-            /* 新库内部完成: 读取传感器 -> 扣除零偏 -> Mahony 融合更新四元数 */
-            if (mpu6050_update(&imu, dt) == 0)
-            {
-                /* 由四元数解算欧拉角 (单位: 度) */
-                mpu6050_get_euler(&imu, &g_roll, &g_pitch, &g_yaw);
-                /* 获取四元数 w,x,y,z */
-                mpu6050_get_quaternion(&imu, g_quat);
-                /* 同步读取原始加速度/角速度供屏幕使用 (可选) */
-                mpu6050_read(&imu, g_acc, g_dps);
-            }
+            /* 由四元数解算欧拉角 (单位: 度) */
+            mpu6050_get_euler(&imu, &g_roll, &g_pitch, &g_yaw);
+            /* 获取四元数 w,x,y,z */
+            mpu6050_get_quaternion(&imu, g_quat);
+            /* 同步读取原始加速度/角速度供屏幕使用 (可选) */
+            mpu6050_read(&imu, g_acc, g_dps);
         }
-        char buf[32];
+
         u8g2_FirstPage(&u8g2);
         do
         {
             u8g2_SetFontMode(&u8g2, 1);
             u8g2_SetFontDirection(&u8g2, 0);
             u8g2_SetFont(&u8g2, u8g2_font_t0_16_mr);
-            snprintf(buf, sizeof(buf), "P%7.02f", g_pitch);
-            u8g2_DrawStr(&u8g2, 0, 10, buf);
-            snprintf(buf, sizeof(buf), "R%7.02f", g_roll);
-            u8g2_DrawStr(&u8g2, 0, 23, buf);
-            snprintf(buf, sizeof(buf), "Y%7.02f", g_yaw);
-            u8g2_DrawStr(&u8g2, 0, 36, buf);
+            snprintf(oled, sizeof(oled), "P%7.02f", g_pitch);
+            u8g2_DrawStr(&u8g2, 0, 10, oled);
+            snprintf(oled, sizeof(oled), "R%7.02f", g_roll);
+            u8g2_DrawStr(&u8g2, 0, 23, oled);
+            snprintf(oled, sizeof(oled), "Y%7.02f", g_yaw);
+            u8g2_DrawStr(&u8g2, 0, 36, oled);
             u8g2_SetFont(&u8g2, u8g2_font_5x7_mr);
-            snprintf(buf, sizeof(buf), "%+.2f%+.2f%+.2f%+.2f", g_quat[0], g_quat[1], g_quat[2], g_quat[3]);
-            u8g2_DrawStr(&u8g2, 0, 49, buf);
+            snprintf(oled, sizeof(oled), "%+.2f%+.2f%+.2f%+.2f", g_quat[0], g_quat[1], g_quat[2], g_quat[3]);
+            u8g2_DrawStr(&u8g2, 0, 49, oled);
         }
         while (u8g2_NextPage(&u8g2));
 

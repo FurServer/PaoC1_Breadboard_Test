@@ -104,7 +104,7 @@ void PID_Reset(PID_t *pid);
 /**
  * @brief 执行一次 PID 运算 (使用 PID_Init 时设定的固定 dt)
  * @param target   目标值
- * @param measure  实测值
+ * @param measure  实际值
  * @return 限幅后的控制输出
  *
  * @note 仅当你能保证“严格固定周期”调用 (如定时器中断) 时才用本函数。
@@ -114,7 +114,7 @@ float PID_Compute(PID_t *pid, float target, float measure);
 /**
  * @brief 执行一次 PID 运算, 并使用“本次实测的时间间隔 dt”
  * @param target   目标值
- * @param measure  实测值
+ * @param measure  实际值
  * @param dt       本次距上次调用经过的真实时间(ms), 必须 > 0
  * @return 限幅后的控制输出
  *
@@ -125,4 +125,4 @@ float PID_ComputeDt(PID_t *pid, float target, float measure, float dt);
 }
 #endif
 
-#endif /* LIB_PID_PID_H */
+#endif
